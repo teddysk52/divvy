@@ -128,7 +128,7 @@ export function SplitPage({ config }: { config: SplitConfig }) {
 
   async function pay() {
     if (!publicKey) return setVisible(true);
-    if (!lamports || lamports <= 0n) return setError('Enter the amount to pay, for example 2.5');
+    if (!lamports || lamports <= 0n) return setError('Type the full prize amount first, for example 2.5');
     setBusy('pay');
     setError('');
     setNotice('');
@@ -284,7 +284,8 @@ export function SplitPage({ config }: { config: SplitConfig }) {
       </section>
 
       <section className="card pay">
-        <h2>Pay this split</h2>
+        <h2>Pay the prize</h2>
+        <p className="hint pay-lead">Whoever pays types the full prize here. Each share is calculated automatically.</p>
         <div className="pay-row">
           <label className="amount">
             <span className="sr">Amount in SOL</span>
