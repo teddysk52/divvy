@@ -86,3 +86,42 @@ describe('split', () => {
     expect(formatSol(1234_000_000_000n)).toBe('1,234');
   });
 });
+
+import { rebalance } from '../src/components/Create';
+
+describe('share editing', () => {
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  it('always totals exactly 100% whatever is typed', () => {
+    const cases: [number[], number, number][] = [
+      [[5000, 5000], 0, 7000],
+      [[3334, 3333, 3333], 0, 5000], // the reported case: 50 / 33.33 / 33.33
+      [[3334, 3333, 3333], 1, 99999],
+      [[3334, 3333, 3333], 2, 0],
+      [[4000, 4000, 2000], 2, 3550],
+      [[1250, 1250, 1250, 1250, 1250, 1250, 1250, 1250], 3, 9000],
+      [[10000], 0, 40],
+      [[100, 9900], 1, 1],
+    ];
+    for (const [current, index, wanted] of cases) {
+      const next = rebalance(current, index, wanted);
+      expect(sum(next)).toBe(10000);
+      next.forEach((v) => expect(v).toBeGreaterThanOrEqual(100));
+    }
+  });
+
+  it('gives the edited share what was asked and scales the rest in proportion', () => {
+    expect(rebalance([3334, 3333, 3333], 0, 5000)).toEqual([5000, 2500, 2500]);
+    expect(rebalance([4000, 4000, 2000], 0, 6000)).toEqual([6000, 2656, 1344]);
+    expect(rebalance([5000, 5000], 0, 99999)).toEqual([9900, 100]);
+  });
+
+  it('leaves shares the person already set alone when another one can absorb the change', () => {
+    // Set teammate 1 to 40, then teammate 2 to 40: only the treasury moves.
+    const first = rebalance([9800, 100, 100], 0, 4000);
+    const second = rebalance(first, 1, 4000, [0]);
+    expect(second).toEqual([4000, 4000, 2000]);
+    // A locked share caps how far another can grow.
+    expect(rebalance([4000, 4000, 2000], 1, 9000, [0])).toEqual([4000, 5900, 100]);
+  });
+});

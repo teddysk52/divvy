@@ -3,6 +3,7 @@ import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { SplitBar, segmentsOf } from './SplitBar';
+import { IconPay, IconShares, IconSign } from './Icons';
 import { Activity, explorerUrl, fetchActivity, Payout, prepareConfirmation, preparePayment, waitForConfirmation } from '../lib/chain';
 import {
   allocate,
@@ -198,22 +199,42 @@ export function SplitPage({ config }: { config: SplitConfig }) {
 
   const payouts = activity?.payouts ?? [];
   const totalPaid = payouts.reduce((sum, p) => sum + p.total, 0n);
+  const stage: 'sign' | 'pay' | 'paid' = payouts.length ? 'paid' : allConfirmed ? 'pay' : 'sign';
 
   return (
     <div className="split">
       <section className="split-head">
-        <div>
-          <h1>{config.name}</h1>
-          <p className="sub">
-            {allConfirmed
-              ? 'Everyone has signed these shares. Send this link to whoever pays the prize.'
-              : 'Send this link to your teammates so each can sign their share, then to whoever pays the prize.'}
-          </p>
-        </div>
+        <h1>{config.name}</h1>
         <button type="button" className="btn btn-ghost" onClick={copyLink}>
           {copied ? 'Link copied' : 'Copy link'}
         </button>
       </section>
+
+      <ol className="stages" aria-label="Progress">
+        <li className={stage === 'sign' ? 'is-now' : 'is-done'}>
+          <IconSign />
+          <span>
+            Sign
+            <small>
+              {activity ? `${config.members.length - waiting.length} of ${config.members.length}` : '…'}
+            </small>
+          </span>
+        </li>
+        <li className={stage === 'pay' ? 'is-now' : stage === 'paid' ? 'is-done' : ''}>
+          <IconPay />
+          <span>
+            Pay
+            <small>one transaction</small>
+          </span>
+        </li>
+        <li className={stage === 'paid' ? 'is-now' : ''}>
+          <IconShares />
+          <span>
+            Split
+            <small>{payouts.length ? `${formatSol(totalPaid)} SOL paid` : 'everyone at once'}</small>
+          </span>
+        </li>
+      </ol>
 
       <SplitBar segments={segmentsOf(config.members, config.treasury?.bps)} paid={justPaid !== null} />
 
@@ -242,7 +263,7 @@ export function SplitPage({ config }: { config: SplitConfig }) {
                     {busy === 'confirm' ? 'Signing…' : 'Sign my share'}
                   </button>
                 ) : (
-                  <span className="chip">{activity ? 'Not signed yet' : 'Checking…'}</span>
+                  <span className="chip">{activity ? 'Waiting' : '…'}</span>
                 )}
               </li>
             );
@@ -256,15 +277,10 @@ export function SplitPage({ config }: { config: SplitConfig }) {
               </div>
               <span className="person-share">{formatPercent(config.treasury.bps)}</span>
               <span className="person-amount">{preview ? `${formatSol(preview.treasury)} SOL` : ''}</span>
-              <span className="chip is-stake">Stakes with Marinade</span>
+              <span className="chip is-stake">Marinade</span>
             </li>
           )}
         </ul>
-        {myIndex === -1 && !allConfirmed && activity && (
-          <p className="hint">
-            Teammates sign by opening this link and connecting the wallet listed above.
-          </p>
-        )}
       </section>
 
       <section className="card pay">
@@ -300,13 +316,12 @@ export function SplitPage({ config }: { config: SplitConfig }) {
               )}
             </>
           ) : (
-            'One transaction pays every share. If any part fails, nothing is sent.'
+            'Everyone is paid in one transaction, or nobody is.'
           )}
         </p>
         {!allConfirmed && activity && waiting.length > 0 && (
           <p className="warn">
-            {waiting.map((m) => m.name).join(' and ')} {waiting.length === 1 ? 'has' : 'have'} not signed yet. You can still
-            pay: the shares in this link cannot be changed.
+            Waiting for {waiting.map((m) => m.name).join(' and ')} to sign. You can still pay.
           </p>
         )}
         {error && (
@@ -328,11 +343,11 @@ export function SplitPage({ config }: { config: SplitConfig }) {
       <section className="card">
         <div className="rows-head">
           <h2>Payments</h2>
-          {payouts.length > 0 && <span className="muted">{formatSol(totalPaid)} SOL paid in total</span>}
+          
         </div>
         {offline && !activity && <p className="hint">Solana is not answering right now. Retrying…</p>}
         {activity && payouts.length === 0 && (
-          <p className="hint">No payments yet. When one arrives, each share shows up here with a public receipt.</p>
+          <p className="hint">No payments yet.</p>
         )}
         <ul className="payouts">
           {payouts.map((p) => (
@@ -344,7 +359,7 @@ export function SplitPage({ config }: { config: SplitConfig }) {
                   {p.time ? `, ${new Date(p.time * 1000).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}` : ''}
                 </span>
                 <span className={`chip ${p.matchesShares ? 'is-ok' : 'is-bad'}`}>
-                  {p.matchesShares ? 'Matches agreed shares' : 'Does not match shares'}
+                  {p.matchesShares ? 'Verified' : 'Does not match shares'}
                 </span>
               </div>
               <div className="payout-parts">

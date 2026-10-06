@@ -58,9 +58,7 @@ export default function App() {
         )}
       </main>
 
-      <footer className="foot">
-        The split lives in its link and on Solana. Divvy has no server and never holds anyone's money.
-      </footer>
+<footer className="foot">No server. Divvy never holds your money.</footer>
     </div>
   );
 }

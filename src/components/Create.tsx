@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { SplitBar, segmentsOf } from './SplitBar';
-import { encodeSplit, formatPercent, MAX_MEMBERS, MEMBER_COLORS, SplitConfig, TOTAL_BPS, TREASURY_COLOR, validate } from '../lib/split';
+import { IconPay, IconShares, IconSign } from './Icons';
+import { encodeSplit, MAX_MEMBERS, MEMBER_COLORS, SplitConfig, TOTAL_BPS, TREASURY_COLOR, validate } from '../lib/split';
 
 interface Row {
   name: string;
@@ -10,11 +11,46 @@ interface Row {
   staked: boolean;
 }
 
-const toBps = (percent: string): number => {
+export const toBps = (percent: string): number => {
   const value = Number(percent.replace(',', '.'));
   return Number.isFinite(value) ? Math.round(value * 100) : 0;
 };
-const fromBps = (bps: number): string => (bps / 100).toFixed(2).replace(/\.?0+$/, '');
+export const fromBps = (bps: number): string => (bps / 100).toFixed(2).replace(/\.?0+$/, '');
+
+/**
+ * Keeps shares at exactly 100%. One share is set to `wanted`; the difference is
+ * taken from shares the person has not set by hand yet (`locked` lists the ones
+ * they have), in proportion to their size. If every other share was set by hand,
+ * all of them adjust. Every share keeps at least 1%. Exported for tests.
+ */
+export function rebalance(current: number[], edited: number, wanted: number, locked: number[] = []): number[] {
+  const others = current.map((_, i) => i).filter((i) => i !== edited);
+  if (others.length === 0) return [TOTAL_BPS];
+  const unlocked = others.filter((i) => !locked.includes(i));
+  const free = unlocked.length ? unlocked : others;
+  const fixed = others.filter((i) => !free.includes(i)).reduce((sum, i) => sum + current[i], 0);
+  const floor = 100; // 1%
+  const value = Math.min(Math.max(Math.round(wanted) || 0, floor), TOTAL_BPS - fixed - floor * free.length);
+  const pool = TOTAL_BPS - fixed - value;
+  const spare = pool - floor * free.length;
+  const weights = free.map((i) => Math.max(current[i] - floor, 0));
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+  const next = [...current];
+  next[edited] = value;
+  let given = 0;
+  free.forEach((i, k) => {
+    const extra = weightSum > 0 ? Math.floor((spare * weights[k]) / weightSum) : Math.floor(spare / free.length);
+    next[i] = floor + extra;
+    given += next[i];
+  });
+  next[free[0]] += pool - given; // rounding leftovers
+  return next;
+}
+
+function evenly(count: number, pool: number): number[] {
+  const each = Math.floor(pool / count);
+  return Array.from({ length: count }, (_, i) => each + (i === 0 ? pool - each * count : 0));
+}
 
 export function Create() {
   const { publicKey } = useWallet();
@@ -23,51 +59,72 @@ export function Create() {
     { name: '', wallet: '', percent: '50', staked: false },
     { name: '', wallet: '', percent: '50', staked: false },
   ]);
-  const [useTreasury, setUseTreasury] = useState(false);
-  const [treasuryWallet, setTreasuryWallet] = useState('');
-  const [treasuryPercent, setTreasuryPercent] = useState('20');
+  const [treasury, setTreasury] = useState<{ wallet: string; percent: string } | null>(null);
   const [showProblems, setShowProblems] = useState(false);
+  /** Shares the person typed themselves; these are the last to be adjusted. */
+  const [touched, setTouched] = useState<number[]>([]);
 
   const config: SplitConfig = useMemo(
     () => ({
       v: 1,
       name,
       members: rows.map((r) => ({ name: r.name, wallet: r.wallet.trim(), bps: toBps(r.percent), ...(r.staked ? { staked: true } : {}) })),
-      treasury: useTreasury ? { wallet: treasuryWallet.trim(), bps: toBps(treasuryPercent) } : undefined,
+      treasury: treasury ? { wallet: treasury.wallet.trim(), bps: toBps(treasury.percent) } : undefined,
     }),
-    [name, rows, useTreasury, treasuryWallet, treasuryPercent],
+    [name, rows, treasury],
   );
   const problems = useMemo(() => validate(config), [config]);
-  const assigned = config.members.reduce((s, m) => s + m.bps, 0) + (config.treasury?.bps ?? 0);
 
   const update = (i: number, patch: Partial<Row>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
-  /** Shares the non-treasury part evenly, giving any leftover hundredth to the first teammate. */
-  const splitEvenly = (count = rows.length, treasuryOn = useTreasury, treasuryPct = treasuryPercent) => {
-    const pool = TOTAL_BPS - (treasuryOn ? toBps(treasuryPct) : 0);
-    if (pool <= 0 || count === 0) return;
-    const each = Math.floor(pool / count);
-    setRows((rs) => rs.slice(0, count).map((r, i) => ({ ...r, percent: fromBps(each + (i === 0 ? pool - each * count : 0)) })));
+  /** Applies a full list of shares: teammates first, treasury last when present. */
+  const apply = (bps: number[], keepRaw?: { index: number; raw: string }) => {
+    setRows((rs) => rs.map((r, i) => ({ ...r, percent: keepRaw?.index === i ? keepRaw.raw : fromBps(bps[i]) })));
+    if (treasury) setTreasury((t) => (t ? { ...t, percent: keepRaw?.index === rows.length ? keepRaw.raw : fromBps(bps[rows.length]) } : t));
+  };
+  const currentBps = () => [...rows.map((r) => toBps(r.percent)), ...(treasury ? [toBps(treasury.percent)] : [])];
+
+  /** While typing, the edited box keeps the raw text and the rest follow so the total stays 100%. */
+  const editShare = (index: number, raw: string) => {
+    const clean = raw.replace(/[^\d.,]/g, '');
+    const total = rows.length + (treasury ? 1 : 0);
+    // Once every share has been set by hand, start over so there is always one that can move.
+    const locked = touched.filter((i) => i !== index).length >= total - 1 ? [] : touched.filter((i) => i !== index);
+    setTouched([...locked, index]);
+    apply(rebalance(currentBps(), index, toBps(clean), locked), { index, raw: clean });
+  };
+  /** On leaving the box, show the value that is actually in effect. */
+  const settleShare = (index: number) =>
+    apply(rebalance(currentBps(), index, currentBps()[index], touched.filter((i) => i !== index)));
+
+  const resetEvenly = (count: number, treasuryBps: number) => {
+    setTouched([]);
+    const shares = evenly(count, TOTAL_BPS - treasuryBps);
+    setRows((rs) => {
+      const list = rs.slice(0, count);
+      while (list.length < count) list.push({ name: '', wallet: '', percent: '0', staked: false });
+      return list.map((r, i) => ({ ...r, percent: fromBps(shares[i]) }));
+    });
   };
 
-  const addRow = () => {
-    setRows((rs) => [...rs, { name: '', wallet: '', percent: '0', staked: false }]);
-    setTimeout(() => splitEvenly(rows.length + 1), 0);
-  };
+  const addRow = () => resetEvenly(rows.length + 1, treasury ? toBps(treasury.percent) : 0);
   const removeRow = (i: number) => {
-    setRows((rs) => rs.filter((_, j) => j !== i));
-    setTimeout(() => splitEvenly(rows.length - 1), 0);
+    setTouched([]);
+    const kept = rows.filter((_, j) => j !== i);
+    const shares = evenly(kept.length, TOTAL_BPS - (treasury ? toBps(treasury.percent) : 0));
+    setRows(kept.map((r, k) => ({ ...r, percent: fromBps(shares[k]) })));
   };
-  const toggleTreasury = (on: boolean) => {
-    setUseTreasury(on);
-    splitEvenly(rows.length, on);
+  const addTreasury = () => {
+    setTreasury({ wallet: '', percent: '20' });
+    resetEvenly(rows.length, 2000);
+  };
+  const removeTreasury = () => {
+    setTreasury(null);
+    resetEvenly(rows.length, 0);
   };
 
   const create = () => {
-    if (problems.length) {
-      setShowProblems(true);
-      return;
-    }
+    if (problems.length) return setShowProblems(true);
     window.location.hash = `#/s/${encodeSplit(config)}`;
     window.scrollTo(0, 0);
   };
@@ -75,26 +132,35 @@ export function Create() {
   return (
     <div className="create">
       <section className="hero">
-        <h1>One prize. Every teammate paid at the same moment.</h1>
-        <p className="lede">
-          Agree on shares before you win. Whoever pays sends one transaction and Solana delivers each share straight to its
-          owner. Nobody holds the whole prize, not even for a second.
-        </p>
-        <SplitBar segments={segmentsOf(config.members, config.treasury?.bps)} />
+        <h1>Split any prize in one transaction.</h1>
+        <p className="lede">Set the shares once. When the prize is paid, everyone gets theirs at the same second.</p>
+        <ol className="steps">
+          <li>
+            <IconShares />
+            <span>Set shares</span>
+          </li>
+          <li>
+            <IconSign />
+            <span>Team signs</span>
+          </li>
+          <li>
+            <IconPay />
+            <span>One payment, split</span>
+          </li>
+        </ol>
       </section>
 
       <section className="card">
-        <label className="field">
-          <span>Split name</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Team Nova, Prague Build Station" maxLength={60} />
-        </label>
+        <SplitBar segments={segmentsOf(config.members, config.treasury?.bps)} />
 
-        <div className="rows-head">
-          <h2>Teammates</h2>
-          <button type="button" className="link" onClick={() => splitEvenly()}>
-            Split evenly
-          </button>
-        </div>
+        <input
+          className="title-input"
+          aria-label="Split name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Name this split, e.g. Team Nova"
+          maxLength={60}
+        />
 
         <ul className="rows">
           {rows.map((row, i) => (
@@ -113,7 +179,7 @@ export function Create() {
                   aria-label={`Teammate ${i + 1} wallet address`}
                   value={row.wallet}
                   onChange={(e) => update(i, { wallet: e.target.value })}
-                  placeholder="Solana wallet address"
+                  placeholder="Wallet address"
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
@@ -129,7 +195,9 @@ export function Create() {
                   aria-label={`Teammate ${i + 1} share in percent`}
                   inputMode="decimal"
                   value={row.percent}
-                  onChange={(e) => update(i, { percent: e.target.value.replace(/[^\d.,]/g, '') })}
+                  onChange={(e) => editShare(i, e.target.value)}
+                  onBlur={() => settleShare(i)}
+                  disabled={rows.length === 1 && !treasury}
                 />
                 <span>%</span>
               </div>
@@ -137,55 +205,29 @@ export function Create() {
                 type="button"
                 className={`mode${row.staked ? ' is-on' : ''}`}
                 aria-pressed={row.staked}
-                title="Stake this share with Marinade on arrival. It lands as mSOL and earns staking rewards."
+                aria-label={`Stake teammate ${i + 1} share with Marinade`}
+                title="Receive this share already staked with Marinade, as mSOL"
                 onClick={() => update(i, { staked: !row.staked })}
               >
-                {row.staked ? 'Staked' : 'Stake it'}
+                <i aria-hidden="true" />
+                Stake
               </button>
-              <button
-                type="button"
-                className="icon"
-                onClick={() => removeRow(i)}
-                disabled={rows.length <= 1}
-                aria-label={`Remove teammate ${i + 1}`}
-              >
+              <button type="button" className="icon" onClick={() => removeRow(i)} disabled={rows.length <= 1} aria-label={`Remove teammate ${i + 1}`}>
                 ×
               </button>
             </li>
           ))}
-        </ul>
 
-        <p className="hint stake-hint">
-          Turn on <strong>Stake it</strong> and that share is staked with Marinade the moment the prize is paid. It arrives as
-          mSOL and earns staking rewards from the first second.
-        </p>
-
-        {rows.length < MAX_MEMBERS && (
-          <button type="button" className="btn btn-ghost" onClick={addRow}>
-            Add teammate
-          </button>
-        )}
-
-        <div className={`treasury${useTreasury ? ' is-on' : ''}`}>
-          <label className="check">
-            <input type="checkbox" checked={useTreasury} onChange={(e) => toggleTreasury(e.target.checked)} />
-            <span>
-              <strong>Keep a share for the team treasury</strong>
-              <small>
-                Money for building after the hackathon. It is staked with Marinade the moment it arrives, so it earns staking
-                rewards as mSOL until the team spends it.
-              </small>
-            </span>
-          </label>
-          {useTreasury && (
-            <div className="row row-treasury">
+          {treasury && (
+            <li className="row row-treasury">
               <span className="dot" style={{ background: TREASURY_COLOR }} aria-hidden="true" />
+              <span className="row-name row-fixed">Treasury</span>
               <div className="row-wallet">
                 <input
                   aria-label="Treasury wallet address"
-                  value={treasuryWallet}
-                  onChange={(e) => setTreasuryWallet(e.target.value)}
-                  placeholder="Treasury wallet address (a shared or multisig wallet)"
+                  value={treasury.wallet}
+                  onChange={(e) => setTreasury({ ...treasury, wallet: e.target.value })}
+                  placeholder="Team wallet address"
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
@@ -195,24 +237,47 @@ export function Create() {
                 <input
                   aria-label="Treasury share in percent"
                   inputMode="decimal"
-                  value={treasuryPercent}
-                  onChange={(e) => setTreasuryPercent(e.target.value.replace(/[^\d.,]/g, ''))}
-                  onBlur={() => splitEvenly()}
+                  value={treasury.percent}
+                  onChange={(e) => editShare(rows.length, e.target.value)}
+                  onBlur={() => settleShare(rows.length)}
                 />
                 <span>%</span>
               </div>
-            </div>
+              <span className="mode is-on is-locked" title="The treasury share is always staked with Marinade">
+                <i aria-hidden="true" />
+                Stake
+              </span>
+              <button type="button" className="icon" onClick={removeTreasury} aria-label="Remove treasury">
+                ×
+              </button>
+            </li>
           )}
+        </ul>
+
+        <div className="adders">
+          {rows.length < MAX_MEMBERS && (
+            <button type="button" className="btn btn-ghost" onClick={addRow}>
+              + Teammate
+            </button>
+          )}
+          {!treasury && (
+            <button type="button" className="btn btn-ghost" onClick={addTreasury}>
+              + Team treasury
+            </button>
+          )}
+          <span className="always">Always adds up to 100%</span>
         </div>
 
-        <div className="create-foot">
-          <p className={`total${assigned === TOTAL_BPS ? ' is-ok' : ''}`}>
-            {assigned === TOTAL_BPS ? 'Shares add up to 100%' : `Shares add up to ${formatPercent(assigned)} of 100%`}
+        {(rows.some((r) => r.staked) || treasury) && (
+          <p className="stake-note">
+            <i aria-hidden="true" />
+            Staked shares go through Marinade and arrive as mSOL, earning rewards from the first second.
           </p>
-          <button type="button" className="btn btn-primary" onClick={create}>
-            Create split link
-          </button>
-        </div>
+        )}
+
+        <button type="button" className="btn btn-primary btn-big" onClick={create}>
+          Create split link
+        </button>
 
         {showProblems && problems.length > 0 && (
           <ul className="problems" role="alert">
@@ -221,21 +286,6 @@ export function Create() {
             ))}
           </ul>
         )}
-      </section>
-
-      <section className="how">
-        <div>
-          <h3>Agree</h3>
-          <p>Each teammate signs the shares with their own wallet. Change one number and it becomes a different split.</p>
-        </div>
-        <div>
-          <h3>Share one link</h3>
-          <p>Give it to the organiser, sponsor or client. They need nothing but a wallet.</p>
-        </div>
-        <div>
-          <h3>Get paid together</h3>
-          <p>One transaction pays everyone or no one. Every payout is public and checkable.</p>
-        </div>
       </section>
     </div>
   );
