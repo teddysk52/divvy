@@ -265,7 +265,6 @@ export function Create() {
               + Team treasury
             </button>
           )}
-          <span className="always">Always adds up to 100%</span>
         </div>
 
         {(rows.some((r) => r.staked) || treasury) && (
